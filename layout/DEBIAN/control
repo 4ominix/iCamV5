@@ -1,0 +1,12 @@
+Package: com.vcnext.app
+Name: VcamNextPlus by Vcamplus
+Description: Professional virtual camera control for supported jailbroken iOS devices, with local media sources, OBS streaming, camera controls, overlays, and private account management.
+Maintainer: Vcamplus
+Author: Vcamplus
+Section: Applications
+Depends: firmware (>= 15.0), mobilesubstrate
+Architecture: iphoneos-arm64e
+Version: 0.16.73+corev2.vnp8~rc1
+Installed-Size: 1528
+Pre-Depends: rootless-compat(>= 0.9)
+Homepage: https://t.me/vcamplus

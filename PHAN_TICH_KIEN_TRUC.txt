@@ -1,0 +1,758 @@
+================================================================================
+    PHÂN TÍCH TOÀN DIỆN TWEAK VcamNextPlus v0.16.73
+    Reverse Engineering & Tái Tạo Theos Project
+================================================================================
+
+Tệp gốc: VcamNextPlus-0.16.73-corev2-vnp8-rc1-roothide.deb
+Package ID: com.vcnext.app
+Tên gốc (trước rebrand): V4HCAM Next (CFBundleName trong Info.plist)
+Tên hiển thị: VcamNextPlus (CFBundleDisplayName + BrandUI tweak)
+Target: iOS 15.0+ | ARM64e | Rootless (roothide)
+Version: 0.16.73+corev2.vnp8~rc1 (Build 37)
+Phụ thuộc: mobilesubstrate, rootless-compat (>=0.9)
+Homepage: https://t.me/vcamplus
+
+================================================================================
+I. TỔNG QUAN KIẾN TRÚC
+================================================================================
+
+Tweak này là một hệ thống camera ảo (virtual camera) hoạt động bằng cách:
+  1. Hook vào pipeline camera của mediaserverd để thay thế frame video
+  2. Chạy RTMP server nhận stream từ bên ngoài
+  3. Hiển thị overlay điều khiển trên SpringBoard
+  4. Quản lý xác thực và license qua daemon mạng
+  5. Ứng dụng chính để cấu hình và quản lý media
+
+Hệ thống gồm 9 thành phần (subproject):
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │                    VCNextPlus Package                       │
+  ├─────────────┬─────────────┬──────────────┬────────────────┤
+  │  VCNShared  │ VCNextCamera│ VCNextOverlay│  VCNextApp     │
+  │  (thư viện) │ (tweak)     │ (tweak)      │  (ứng dụng)   │
+  ├─────────────┼─────────────┼──────────────┼────────────────┤
+  │VCNextBrandUI│VCNextNetwork│VCNStreamDaemon│VCNNetworkDaemon│
+  │  (tweak)    │  Compat     │  (daemon)     │  (daemon)      │
+  │             │  (tweak)    │               │                │
+  ├─────────────┴─────────────┴──────────────┴────────────────┤
+  │              VCNNetworkDaemonLauncher (tool)               │
+  └─────────────────────────────────────────────────────────────┘
+
+================================================================================
+II. CÁC BINARY MACH-O ĐÃ PHÂN TÍCH
+================================================================================
+
+Tổng cộng 8 binary ARM64 được trích xuất từ .deb:
+
+  1. VCNextCamera.dylib      → Hook mediaserverd (camera pipeline)
+  2. VCNextOverlay.dylib     → Hook SpringBoard (floating UI)
+  3. VCNextBrandUI.dylib     → Hook VCNext app (đổi tên hiển thị)
+  4. VCNextNetworkCompat.dylib → Hook network daemon (redirect URL)
+  5. VCNStreamDaemon         → RTMP server executable
+  6. VCNNetworkDaemon        → Auth/heartbeat executable
+  7. VCNNetworkDaemonLauncher → Launcher executable (pure C)
+  8. VCNextApp               → Main UI application
+
+Tất cả class name đều bị obfuscate theo pattern: VCN + hash hex 20 ký tự
+Ví dụ: VCN1ff954045d30fc725a96, VCNa3b8c2d1e4f567890123
+Giải mã dựa trên: selector, string reference, superclass, framework import
+
+================================================================================
+III. CHI TIẾT TỪNG THÀNH PHẦN
+================================================================================
+
+─────────────────────────────────────────────────────────────────
+III.1  VCNShared (Thư viện chia sẻ - libVCNShared.dylib)
+─────────────────────────────────────────────────────────────────
+
+Mục đích: Cung cấp API chung cho tất cả thành phần khác
+
+[VCNPaths] - Định nghĩa đường dẫn file
+  VCN_ROOT_PREFIX           = "/var/jb"
+  VCN_SHARED_DIR            = "/var/jb/var/mobile/Library/VCNext"
+  VCNAuthSessionPath        = .../AuthSession.plist
+  VCNCameraConfigPath       = .../CameraConfig.plist
+  VCNCameraStatusPath       = .../CameraStatus.plist
+  VCNCapabilityLeasePath    = .../CapabilityLease.plist
+  VCNServerStatusPath       = .../ServerStatus.plist
+  VCNMediaDirectory         = .../Media/
+  VCNStreamDirectory        = .../Streams/
+  VCNIncomingStreamPath     = .../Streams/incoming.flv
+  VCNLatestStreamPath       = .../Streams/latest.flv
+  VCNLiveStreamPath         = .../Streams/live.vcn
+
+[VCNNotifications] - Darwin notification IPC
+  com.vcnext.auth.changed        → Auth session thay đổi
+  com.vcnext.camera.config       → Config camera thay đổi
+  com.vcnext.camera.status       → Trạng thái camera thay đổi
+  com.vcnext.capability.changed  → Capability lease thay đổi
+  com.vcnext.server.status       → RTMP server status thay đổi
+  com.vcnext.overlay.toggle      → Bật/tắt overlay
+  com.vcnext.stream.start        → Bắt đầu stream
+  com.vcnext.stream.stop         → Dừng stream
+
+  Helper functions:
+    VCNPostDarwinNotification()    → Gửi notification
+    VCNObserveDarwinNotification() → Đăng ký lắng nghe
+
+[VCNSecurity] - Crypto & Keychain
+  ● EC Key Generation (secp256r1 / P-256)
+    - generateECKeyPairPublicKey:privateKey:
+    - Lưu/đọc key từ Keychain theo tag
+
+  ● ECDSA Signing/Verification
+    - ecdsaSignData:withPrivateKey:
+    - ecdsaVerifyData:signature:withPublicKey:
+    - Thuật toán: kSecKeyAlgorithmECDSASignatureMessageX962SHA256
+
+  ● RSA Verification
+    - rsaVerifyData:signature:withPublicKey:
+    - Thuật toán: kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256
+
+  ● HMAC-SHA256
+    - hmacSHA256:withKey:
+    - Dùng CommonCrypto CCHmac
+
+  ● SHA-256 Hash
+    - sha256:  → trả về NSData
+    - sha256HexString:  → trả về hex string (dùng cho password hash)
+
+  ● AES Encryption/Decryption
+    - aesEncrypt:withKey:iv:
+    - aesDecrypt:withKey:iv:
+    - AES-256-CBC, PKCS7 padding
+
+  ● Keychain CRUD
+    - saveToKeychain:data:
+    - loadFromKeychain:
+    - deleteFromKeychain:
+    - Service: "com.vcnext.app"
+
+  ● Certificate Trust Evaluation
+    - evaluateTrust:forHost:  → SSL pinning
+
+[VCNConfig] - Quản lý cấu hình
+  ● Plist read/write với NSFileProtectionCompleteUntilFirstUserAuthentication
+  ● Device detection: uname() → machine field
+  ● isA13Device: kiểm tra iPhone12,* (iPhone 12 family, chip A13)
+  ● Accessors cho tất cả plist config files
+  ● ensureDirectoryExists: tạo thư mục với quyền 0755
+
+─────────────────────────────────────────────────────────────────
+III.2  VCNextCamera (Tweak - Hook mediaserverd)
+─────────────────────────────────────────────────────────────────
+
+Filter: Load vào cả "cameracaptured" VÀ "mediaserverd"
+  (cameracaptured là daemon camera riêng trên một số phiên bản iOS)
+Linked Frameworks: CoreImage, CoreVideo, VideoToolbox, Vision, Security
+
+ĐÂY LÀ THÀNH PHẦN CỐT LÕI - thay thế frame camera thật bằng nội dung giả.
+
+[Tweak.xm] - Logos hooks vào các class nội bộ của mediaserverd:
+
+  %hook BWImageQueueSinkNode
+    - (void)renderSampleBuffer:(CMSampleBufferRef)buf forInput:(id)input
+    → Chặn frame từ image queue, gọi VCNFrameProcessor để thay thế
+
+  %hook BWPreviewSinkNode
+    - (void)renderSampleBuffer:(CMSampleBufferRef)buf forInput:(id)input
+    → Chặn frame preview (hiển thị trên màn hình camera)
+
+  %hook BWRemoteQueueSinkNode
+    - (void)renderSampleBuffer:(CMSampleBufferRef)buf forInput:(id)input
+    → Chặn frame gửi qua remote connection (FaceTime, v.v.)
+
+  %hook BWStillImageSampleBufferSinkNode
+    - (void)renderSampleBuffer:(CMSampleBufferRef)buf forInput:(id)input
+    → Chặn frame chụp ảnh tĩnh
+
+  %hook BWPhotoEncoderNode
+    - (void)renderSampleBuffer:(CMSampleBufferRef)buf forInput:(id)input
+    → Chặn frame trước khi encode JPEG/HEIC
+
+  %hook BWNodeOutput
+    - (void)emitSampleBuffer:(CMSampleBufferRef)buf
+    → Chặn tại điểm output chung nhất (catch-all)
+
+  %ctor (Constructor):
+    → Đăng ký lắng nghe Darwin notifications
+    → Load config từ CameraConfig.plist
+    → Khởi tạo VCNFrameProcessor, VCNVideoDecoder, VCNStreamReader
+
+[VCNFrameProcessor] - Engine thay thế frame
+  Quy trình xử lý:
+  1. Nhận CMSampleBufferRef gốc từ camera
+  2. Load media thay thế (ảnh hoặc video) từ đường dẫn config
+  3. Scale-to-fill + crop CIImage cho khớp kích thước frame gốc
+  4. Áp dụng Color Sync nếu bật (VCNColorSync)
+  5. Áp dụng Face Blur nếu bật (VCNFaceDetector)
+  6. Dùng VTPixelTransferSession scale pixel buffer
+  7. Render qua CIContext
+  8. Tạo CMSampleBufferRef mới với pixel buffer đã thay thế
+  9. Copy tất cả attachments từ buffer gốc (metadata, timing, v.v.)
+
+  Hỗ trợ nguồn media:
+    - Image: CIImage từ file (PNG, JPEG, HEIC)
+    - Video: AVAssetReader → CMSampleBuffer → CIImage (loop playback)
+    - Stream: Đọc từ FLV file (incoming.flv) qua VCNStreamReader
+
+[VCNVideoDecoder] - Giải mã H.264
+  - VTDecompressionSession với callback async
+  - Xử lý SPS/PPS parameter sets từ NAL units
+  - Feed NAL units (type 1: slice, type 5: IDR)
+  - Output: CVPixelBufferRef (kCVPixelFormatType_32BGRA)
+  - Thread-safe với dispatch_semaphore
+
+[VCNStreamReader] - Đọc FLV stream
+  - Timer-based polling (kiểm tra file thay đổi)
+  - Parse FLV header (signature 'FLV', version, flags)
+  - Parse FLV tags (video: 0x09, audio: 0x08, script: 0x12)
+  - Trích xuất AVC decoder config (SPS/PPS từ FLV sequence header)
+  - Feed NAL units vào VCNVideoDecoder
+  - Xử lý timestamp và đồng bộ
+
+[VCNFaceDetector] - Phát hiện khuôn mặt
+  - Vision framework: VNDetectFaceRectanglesRequest
+  - Tạo mask từ vùng khuôn mặt phát hiện được
+  - CIGaussianBlur cho vùng ngoài khuôn mặt
+  - CIBlendWithMask để kết hợp: mặt rõ + nền mờ
+  - Configurable blur radius
+
+[VCNColorSync] - Điều chỉnh màu
+  - CIColorKernel (Metal Shading Language hoặc CIKernel language)
+  - Tham số: redShift, greenShift, blueShift (float, -1.0 đến 1.0)
+  - Vùng áp dụng (region):
+    ● Full: toàn bộ frame
+    ● Forehead: phần trên (y > 0.6)
+    ● Chin: phần dưới (y < 0.4)
+    ● Sides: hai bên (x < 0.3 hoặc x > 0.7)
+
+─────────────────────────────────────────────────────────────────
+III.3  VCNextOverlay (Tweak - Hook SpringBoard)
+─────────────────────────────────────────────────────────────────
+
+Filter: Load vào executable "SpringBoard" (dùng Executables key, không phải Bundles)
+
+[Tweak.xm]
+  %hook SpringBoard
+    - (void)applicationDidFinishLaunching:(id)app
+    → Tạo VCNFloatingWindow
+    → Đăng ký tất cả Darwin notifications
+    → Lắng nghe UIApplicationDidBecomeActiveNotification
+    → Lắng nghe UIDeviceOrientationDidChangeNotification
+
+[VCNFloatingWindow] - Cửa sổ nổi
+  - UIWindow subclass tại UIWindowLevelAlert + 1 (luôn trên cùng)
+  - Nút camera tròn, có thể kéo (UIPanGestureRecognizer)
+  - Tự động snap vào cạnh màn hình gần nhất
+  - Lưu vị trí vào NSUserDefaults (com.vcnext.overlay)
+  - hitTest pass-through: chỉ chặn touch trên nút, còn lại pass qua
+  - Nhấn nút → toggle VCNControlPanel
+
+[VCNControlPanel] - Bảng điều khiển
+  - UIView với các nút trong UIStackView:
+    ● Toggle: bật/tắt camera ảo
+    ● Stream: bắt đầu/dừng RTMP stream
+    ● Source: chọn nguồn media (ảnh/video/stream)
+    ● Color: mở cài đặt Color Sync
+  - Status label hiển thị trạng thái hiện tại
+  - Cập nhật từ CameraConfig.plist, CameraStatus.plist, CapabilityLease.plist
+
+[VCNScreenCapture] - Chụp màn hình
+  - IOSurface-based capture
+  - Load CARenderServerRenderDisplay qua dlsym từ QuartzCore
+  - Tạo IOSurface với kích thước màn hình
+  - Render display 0 (màn hình chính) vào IOSurface
+  - Chuyển đổi IOSurface → CVPixelBuffer → CIImage
+
+─────────────────────────────────────────────────────────────────
+III.4  VCNextBrandUI (Tweak - Đổi tên hiển thị)
+─────────────────────────────────────────────────────────────────
+
+Filter: Chỉ load vào com.vcnext.app (ứng dụng chính)
+
+Cơ chế: Swizzle 2 method bằng __attribute__((constructor)):
+  - [UIViewController setTitle:]  → thay "V4HCAM Next" → "VcamNextPlus"
+  - [UILabel setText:]            → thay "V4HCAM Next" → "VcamNextPlus"
+
+Mục đích: Rebrand giao diện app gốc thành tên custom
+
+─────────────────────────────────────────────────────────────────
+III.5  VCNextNetworkCompat (Tweak - Redirect URL)
+─────────────────────────────────────────────────────────────────
+
+Filter: Chỉ load vào process VCNNetworkDaemon
+
+Cơ chế: Swizzle +[NSURL URLWithString:]
+  - Kiểm tra URL chứa "anix204.xyz"
+  - Thay thế bằng "vcnext.corev.bond"
+  - Tất cả request API được redirect sang server mới
+
+Injection chain:
+  VCNNetworkDaemonLauncher
+    → setenv("DYLD_INSERT_LIBRARIES", "/usr/lib/TweakInject/VCNextNetworkCompat.dylib")
+    → execl("VCNNetworkDaemon")
+    → VCNextNetworkCompat.dylib được load tự động
+    → Swizzle NSURL trước khi daemon bắt đầu hoạt động
+
+─────────────────────────────────────────────────────────────────
+III.6  VCNNetworkDaemonLauncher (Tool - Pure C)
+─────────────────────────────────────────────────────────────────
+
+Binary thuần C, không link ObjC runtime.
+
+Quy trình:
+  1. _NSGetExecutablePath() → lấy đường dẫn của chính nó
+  2. Tính đường dẫn VCNNetworkDaemon (cùng thư mục)
+  3. setenv("DYLD_INSERT_LIBRARIES", "/usr/lib/TweakInject/VCNextNetworkCompat.dylib")
+  4. execl() → thay thế process bằng VCNNetworkDaemon
+
+Tại sao cần launcher riêng?
+  → LaunchDaemon không hỗ trợ EnvironmentVariables cho DYLD_*
+  → Cần set DYLD_INSERT_LIBRARIES trước khi exec daemon
+  → Launcher giải quyết chicken-and-egg problem
+
+─────────────────────────────────────────────────────────────────
+III.7  VCNStreamDaemon (Tool - RTMP Server)
+─────────────────────────────────────────────────────────────────
+
+LaunchDaemon: com.vcnext.streamd (RunAtLoad, KeepAlive, ProcessType=Background)
+UserName: mobile (chạy với quyền user, không root)
+Install path: /var/jb/usr/libexec/VCNStreamDaemon
+
+RTMP server đầy đủ chạy trên port 1935, nhận stream từ OBS/FFmpeg/etc.
+
+[main.m]
+  - Signal handling: SIGTERM, SIGINT → cleanup, SIGPIPE → ignore
+  - Tạo thư mục VCN_SHARED_DIR, Streams/
+  - Khởi tạo rtmp_server_create(1935)
+  - Set callbacks: video, audio, status
+  - Video callback → ghi FLV tags vào incoming.flv
+  - Status callback → ghi ServerStatus.plist + post notification
+  - Main loop: poll capability lease mỗi 5 giây
+
+[RTMP Protocol Stack] - Implement bằng C thuần:
+
+  rtmp_server.c    → Core server: socket, accept, recv loop
+  rtmp_handshake.c → RTMP handshake (C0/C1/C2 ↔ S0/S1/S2)
+                     Simplified (không digest/DH), 1536-byte random
+                     Post-handshake: WindowAckSize + PeerBandwidth + ChunkSize
+
+  rtmp_chunk.c     → RTMP chunking layer
+                     - Chunk Basic Header (1-3 bytes, fmt + csid)
+                     - Chunk Message Header (0/3/7/11 bytes theo fmt)
+                     - Extended timestamp support (>= 0xFFFFFF)
+                     - Read: reassemble chunks → complete messages
+                     - Write: split messages → chunks (4096 byte mỗi chunk)
+                     - Hỗ trợ tối đa 64 channel đồng thời
+
+  rtmp_amf.c       → AMF0 (Action Message Format) codec
+                     Decode: Number, Boolean, String, Object, ECMA Array, Null
+                     Encode: Number, Boolean, String, Object (start/prop/end), Null
+                     Object property access: amf_object_get()
+
+  rtmp_netconnection.c → NetConnection command handling
+                     connect     → _result(fmsVer, capabilities) + onBWDone
+                     releaseStream → _result
+                     FCPublish     → _result
+                     createStream  → _result(streamId=1)
+                     closeStream   → set publishing=0
+                     deleteStream  → set publishing=0
+
+  rtmp_netstream.c → NetStream command handling + invoke dispatcher
+                     publish      → StreamBegin + onStatus(Publish.Start) + onFCPublish
+                     FCUnpublish  → onStatus(Unpublish.Success)
+                     Invoke dispatcher: parse AMF0 command name + txnId → route
+
+  rtmp_flv.c       → FLV container format
+                     Header: 'FLV' + version + flags + dataOffset
+                     Tag: type(8=audio,9=video,18=script) + size + timestamp + data
+                     PreviousTagSize: 4 bytes after each tag
+
+Luồng dữ liệu RTMP:
+  OBS/FFmpeg → TCP:1935 → Handshake → connect → createStream → publish
+  → Video data (type 9) → callback → ghi FLV vào incoming.flv
+  → VCNextCamera đọc incoming.flv → decode H.264 → thay thế frame camera
+
+─────────────────────────────────────────────────────────────────
+III.8  VCNNetworkDaemon (Tool - Auth & Heartbeat)
+─────────────────────────────────────────────────────────────────
+
+LaunchDaemon: com.vcnext.networkd (RunAtLoad, KeepAlive, ProcessType=Background)
+UserName: root (cần quyền root cho CoreTelephony private API)
+Được launch qua VCNNetworkDaemonLauncher (để inject URL redirect)
+Install path: /var/jb/usr/libexec/VCNNetworkDaemon
+
+Entitlements:
+  - com.apple.CommCenter.fine-grained: ["spi"]
+  - com.apple.private.CoreTelephony.Identity: true
+  - keychain-access-groups: ["com.vcnext.app"]
+
+[main.m]
+  - Tạo EC key pair nếu chưa có (ECDSA P-256)
+  - Cho phép cellular data cho com.vcnext.app
+  - Khởi tạo VCNHTTPClient với base URL https://vcnext.corev.bond
+  - Khởi tạo VCNAuthHeartbeat
+  - Đăng ký lắng nghe VCNAuthSessionChangedNotification
+  - Xác thực ban đầu → start heartbeat → NSRunLoop run
+
+[VCNHTTPClient] - HTTP client
+  - NSURLSession với ephemeral configuration
+  - Timeout: request 30s, resource 60s
+  - GET/POST với JSON body
+  - Authorization: Bearer token
+  - User-Agent: VCNextPlus/0.16
+  - SSL delegate (trust evaluation)
+
+[VCNAuthHeartbeat] - Heartbeat & License
+  - Heartbeat interval: 300 giây (5 phút)
+  - Lease refresh interval: 3600 giây (1 giờ)
+
+  Heartbeat payload:
+    {
+      "deviceId": <UUID từ config>,
+      "model": <hw.machine>,
+      "timestamp": <unix timestamp>,
+      "signature": <ECDSA signature của "deviceId:model:timestamp">,
+      "version": "0.16.73"
+    }
+
+  API endpoints:
+    POST /api/v2/heartbeat       → Heartbeat + capability refresh
+    GET  /api/v2/auth/verify     → Xác thực token
+    GET  /api/v2/capability/lease → Refresh capability lease
+
+  Response handling:
+    status="ok" → cập nhật capability lease → post notification
+    status="unauthorized" → xóa auth session → post notification
+
+[VCNCellularPolicy] - CoreTelephony Private API
+  - dlopen CoreTelephony.framework
+  - dlsym: CTServerConnectionCreate, CTServerConnectionSetCellularUsagePolicy
+  - Cho phép/từ chối cellular data theo bundle ID
+  - Dùng cho: đảm bảo daemon có quyền truy cập mạng di động
+
+─────────────────────────────────────────────────────────────────
+III.9  VCNextApp (Application - UI chính)
+─────────────────────────────────────────────────────────────────
+
+Bundle ID: com.vcnext.app
+
+[VCNAppDelegate]
+  - Dark theme navigation bar
+  - UINavigationController với VCNMainViewController
+
+[VCNMainViewController] - Màn hình chính (UITableViewController)
+  4 sections:
+    Account: Login/Logout, hiển thị username
+    Camera: Trạng thái camera, link đến Camera Config
+    Media: Import từ Photos, Import từ Files
+    Server: RTMP server state, port, capability status
+
+  Darwin notification observers → auto-refresh UI
+
+[VCNAccountManager] - Quản lý tài khoản (Singleton)
+  Login: POST /api/v2/auth/login
+    Body: username, password (SHA-256 hash), deviceId, model
+    Response: token → lưu AuthSession.plist → post notification
+
+  Logout: xóa AuthSession + CapabilityLease → post notifications
+
+[VCNMediaPicker] - Chọn media
+  - PHPickerViewController: chọn ảnh/video từ Photos
+  - UIDocumentPickerViewController: chọn file từ Files
+  - Copy media vào VCNMediaDirectory với tên vcn_<timestamp>.<ext>
+  - Cập nhật CameraConfig.plist: mediaPath + sourceType
+
+[VCNCameraConfigController] - Cấu hình camera (UITableViewController grouped)
+  3 sections:
+    Source: enabled, sourceType (image/video/stream), mediaPath
+    Color Sync: enabled, redShift, greenShift, blueShift, region
+    Face Detection: faceBlurEnabled, blurRadius
+
+  Save → ghi CameraConfig.plist → post VCNCameraConfigChangedNotification
+
+================================================================================
+IV. HỆ THỐNG IPC (Inter-Process Communication)
+================================================================================
+
+Tất cả giao tiếp giữa các process dùng 2 cơ chế:
+
+[1] Darwin Notifications (CFNotificationCenter)
+    - Không mang dữ liệu, chỉ là tín hiệu "có gì đó thay đổi"
+    - Receiver đọc dữ liệu mới từ plist file tương ứng
+    - Gửi: CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter())
+    - Nhận: CFNotificationCenterAddObserver()
+
+    Luồng notification điển hình:
+      App login → ghi AuthSession.plist → post auth.changed
+      → NetworkDaemon nhận → đọc AuthSession.plist → xác thực
+      → Nhận capability → ghi CapabilityLease.plist → post capability.changed
+      → Camera tweak nhận → đọc CapabilityLease.plist → bật/tắt
+
+[2] Plist Files (Shared filesystem)
+    Tất cả nằm trong /var/jb/var/mobile/Library/VCNext/
+
+    AuthSession.plist:
+      username, token, expiresAt, loginTime
+
+    CameraConfig.plist:
+      enabled, sourceType, mediaPath
+      colorSyncEnabled, redShift, greenShift, blueShift, colorRegion
+      faceBlurEnabled, blurRadius
+
+    CameraStatus.plist:
+      active (BOOL), lastFrameTime, frameCount
+
+    CapabilityLease.plist:
+      streamEnabled, maxResolution, expiresAt, features[]
+
+    ServerStatus.plist:
+      state (idle/listening/connected/streaming), port, timestamp
+
+================================================================================
+V. LUỒNG THỰC THI (Execution Flow)
+================================================================================
+
+[A] Khởi động hệ thống (sau cài đặt / reboot):
+
+  1. launchd load com.vcnext.stream.plist
+     → Chạy VCNStreamDaemon
+     → Mở TCP socket port 1935
+     → Trạng thái: LISTENING
+
+  2. launchd load com.vcnext.network.plist
+     → Chạy VCNNetworkDaemonLauncher
+     → Set DYLD_INSERT_LIBRARIES → exec VCNNetworkDaemon
+     → VCNextNetworkCompat.dylib được inject
+     → Tạo EC key pair nếu cần
+     → Set cellular policy
+     → Xác thực → bắt đầu heartbeat
+
+  3. mediaserverd khởi động (hoặc bị kill bởi postinst)
+     → MobileSubstrate load VCNextCamera.dylib
+     → Logos hooks cài đặt vào BW* classes
+     → Đọc CameraConfig.plist
+     → Nếu enabled: khởi tạo frame processor
+
+  4. SpringBoard khởi động
+     → MobileSubstrate load VCNextOverlay.dylib
+     → Tạo floating window + camera button
+     → Đăng ký notification observers
+
+[B] Người dùng bật camera ảo:
+
+  1. Nhấn nút camera trên overlay (SpringBoard)
+  2. Toggle → ghi CameraConfig.plist: enabled=true
+  3. Post VCNCameraConfigChangedNotification
+  4. VCNextCamera nhận notification
+  5. Đọc CameraConfig.plist mới
+  6. Load media source (ảnh/video/stream)
+  7. Bắt đầu thay thế frame trong renderSampleBuffer:
+
+[C] Người dùng stream từ OBS:
+
+  1. OBS kết nối rtmp://localhost:1935/live
+  2. VCNStreamDaemon accept connection
+  3. RTMP handshake (C0C1 → S0S1S2 → C2)
+  4. connect → createStream → publish
+  5. Video data → ghi vào incoming.flv
+  6. Trạng thái: STREAMING → post notification
+  7. VCNextCamera đọc incoming.flv
+  8. VCNStreamReader parse FLV → extract NAL units
+  9. VCNVideoDecoder decode H.264 → CVPixelBuffer
+  10. VCNFrameProcessor thay thế frame camera
+
+[D] Heartbeat & License:
+
+  1. Mỗi 5 phút: VCNAuthHeartbeat gửi heartbeat
+  2. Payload ký bằng ECDSA (device private key)
+  3. Server xác minh chữ ký
+  4. Server trả về capability lease mới
+  5. Ghi CapabilityLease.plist → post notification
+  6. Camera tweak kiểm tra streamEnabled
+  7. Mỗi 1 giờ: refresh capability lease riêng
+
+================================================================================
+VI. BẢO MẬT & CRYPTO
+================================================================================
+
+[Mã hóa key pair thiết bị]
+  - ECDSA P-256 (secp256r1)
+  - Lưu trong iOS Keychain: com.vcnext.device.ec.private/public
+  - Dùng để ký heartbeat payload
+  - Server xác minh → chống replay & giả mạo thiết bị
+
+[Xác thực]
+  - Password hash: SHA-256 hex string (client-side)
+  - Token-based: Bearer token trong Authorization header
+  - Token lưu trong AuthSession.plist (file protection)
+
+[Mã hóa dữ liệu]
+  - AES-256-CBC cho dữ liệu nhạy cảm (nếu cần)
+  - HMAC-SHA256 cho integrity checking
+  - RSA PKCS1v15 SHA256 cho xác minh server response
+
+[SSL/TLS]
+  - NSURLSession delegate cho trust evaluation
+  - Certificate pinning capability (SecTrust)
+
+[File Protection]
+  - NSFileProtectionCompleteUntilFirstUserAuthentication
+  - Áp dụng cho tất cả plist config files
+
+================================================================================
+VII. XỬ LÝ THIẾT BỊ ĐẶC BIỆT (A13 / iPhone 12)
+================================================================================
+
+Binary có code riêng cho iPhone12,* (chip A13):
+  - postinst: xóa .a13_canary flag
+  - preinst: xóa .a13_canary flag
+  - VCNConfig isA13Device: kiểm tra uname machine
+
+Lý do: A13 có khác biệt trong camera pipeline (ISP configuration),
+cần xử lý đặc biệt để hooks hoạt động đúng.
+
+================================================================================
+VIII. CẤU TRÚC PACKAGE (.deb)
+================================================================================
+
+DEBIAN/
+  control          → metadata, dependencies, version, homepage
+  postinst         → tạo thư mục, chmod, A13 canary handling,
+                     load LaunchDaemons, uicache, kill mediaserverd
+                     CHỈ xóa AuthSession khi fresh install (không upgrade)
+  preinst          → clean A13 canary flags (package flag + runtime marker)
+  prerm            → unload LaunchDaemons CHỈ KHI $1="remove"
+
+Library/
+  LaunchDaemons/
+    com.vcnext.streamd.plist  → VCNStreamDaemon (KeepAlive, UserName=mobile)
+    com.vcnext.networkd.plist → VCNNetworkDaemonLauncher (KeepAlive, UserName=root)
+
+  MobileSubstrate/DynamicLibraries/ (hoặc TweakInject/)
+    VCNextCamera.dylib        → filter: cameracaptured + mediaserverd
+    VCNextCamera.plist
+    VCNextOverlay.dylib       → filter: SpringBoard (Executables key)
+    VCNextOverlay.plist
+    VCNextBrandUI.dylib       → filter: com.vcnext.app (Bundles key)
+    VCNextBrandUI.plist
+    VCNextNetworkCompat.dylib → filter: VCNNetworkDaemon (Executables key)
+    VCNextNetworkCompat.plist
+
+usr/
+  lib/
+    libVCNShared.dylib        → shared library
+  libexec/
+    VCNStreamDaemon           → RTMP server
+    VCNNetworkDaemon          → auth/heartbeat daemon
+    VCNNetworkDaemonLauncher  → DYLD injection launcher
+
+Applications/
+  VCNext.app/                 → main UI application
+    VCNext                    → executable
+    Info.plist                → CFBundleName="V4HCAM Next", DisplayName="VcamNextPlus"
+    AppIcon.png               → icon 1x
+    AppIcon@2x.png            → icon 2x
+    AppIcon@3x.png            → icon 3x
+    BrandLogo.png             → logo hiển thị trong app
+
+var/mobile/Library/pkgmirror/ → Bản sao cho roothide PatchLoader
+  Applications/VCNext.app/    → mirror app bundle
+  DEBIAN.com.vcnext.app/      → mirror DEBIAN scripts (tên gốc V4HCAM)
+  Library/                    → mirror LaunchDaemons + dylibs + plists
+  usr/                        → mirror executables
+
+================================================================================
+IX. THỐNG KÊ DỰ ÁN TÁI TẠO
+================================================================================
+
+Tổng: 81 files source code
+
+  VCNShared:              9 files  (thư viện chia sẻ)
+  VCNextCamera:          13 files  (camera hooks + xử lý frame)
+  VCNextOverlay:          7 files  (SpringBoard overlay UI)
+  VCNextBrandUI:          2 files  (rebrand tweak)
+  VCNextNetworkCompat:    2 files  (URL redirect tweak)
+  VCNNetworkDaemonLauncher: 2 files  (launcher C)
+  VCNStreamDaemon:       15 files  (RTMP server + FLV)
+  VCNNetworkDaemon:       8 files  (auth daemon)
+  VCNextApp:             10 files  (main UI app)
+  layout/:                8 files  (DEBIAN + LaunchDaemons + filters)
+  Makefile (master):      1 file   (aggregate build)
+
+Ngôn ngữ:
+  - Objective-C (Logos .xm): hooks
+  - Objective-C (.m/.h): UI, networking, config
+  - C (.c/.h): RTMP protocol stack, launcher
+  - Plist (XML): config, filters, LaunchDaemons
+
+Frameworks sử dụng:
+  Foundation, CoreFoundation, UIKit, Security, CommonCrypto,
+  CoreImage, CoreVideo, VideoToolbox, Vision, AVFoundation,
+  IOSurface, QuartzCore, CoreTelephony, Photos, PhotosUI
+
+Private APIs:
+  - CARenderServerRenderDisplay (QuartzCore, screen capture)
+  - CTServerConnectionCreate / SetCellularUsagePolicy (CoreTelephony)
+  - BW* classes (mediaserverd internal camera pipeline)
+
+================================================================================
+X. GHI CHÚ KỸ THUẬT
+================================================================================
+
+1. Tất cả class name trong binary gốc bị obfuscate (VCN + hex hash).
+   Tên trong project tái tạo là tên đã giải mã dựa trên phân tích chức năng.
+
+2. Project sử dụng rootless path prefix /var/jb/ (roothide compatibility).
+   Trên jailbreak rootful, thay /var/jb/ bằng / trong VCNPaths.h.
+
+3. RTMP server implement đơn giản hóa (không hỗ trợ digest handshake,
+   không AMF3, không shared object). Đủ cho use case nhận stream từ
+   OBS/FFmpeg một client tại một thời điểm.
+
+4. Camera hooks target các class BW* của mediaserverd, đây là internal
+   API không có documentation. Tên và interface có thể thay đổi giữa
+   các phiên bản iOS.
+
+5. URL redirect (anix204.xyz → vcnext.corev.bond) cho thấy đây là
+   bản mod/crack của một tweak gốc, chuyển hướng license server.
+
+6. Package chứa bản sao pkgmirror đầy đủ tại:
+   /var/mobile/Library/pkgmirror/
+   Đây là cơ chế của roothide PatchLoader - nó cần bản sao của tất cả
+   binary và dylib để patch + re-sign tại boot time.
+   DEBIAN.com.vcnext.app/ chứa control file gốc với tên "V4HCAM Next"
+   (tên trước khi rebrand), cho thấy chuỗi fork:
+   V4HCAM Next (gốc) → VcamNextPlus (mod/rebrand bởi Vcamplus)
+
+7. VCNextCamera filter cả "cameracaptured" lẫn "mediaserverd":
+   - mediaserverd: daemon camera chính trên iOS
+   - cameracaptured: daemon camera riêng xuất hiện từ iOS 17+
+   (Apple tách camera pipeline ra process riêng)
+   Tweak hook cả hai để đảm bảo tương thích iOS 15-17+.
+
+8. LaunchDaemon labels dùng hậu tố "d" (streamd, networkd) theo
+   convention Unix daemon naming.
+   StreamDaemon chạy với UserName=mobile (không cần root).
+   NetworkDaemon chạy với UserName=root (cần cho CoreTelephony SPI).
+
+9. postinst A13 handling: trên iPhone12,* (A13), postinst viết lại
+   VCNextCamera.plist để CHỈ filter mediaserverd (bỏ cameracaptured).
+   Comment giải thích: trước đây A13 có PAC trap crash mediaserverd,
+   nhưng bản build mới với Xcode SDK đã fix ptrauth.
+   A13 canary là cơ chế cũ để disable camera dylib trên A13,
+   giờ không cần nữa → xóa flag.
+
+10. Info.plist app gốc:
+    - NSLocalNetworkUsageDescription: "Receive the OBS camera stream
+      from devices on your local Wi-Fi network."
+    - NSPhotoLibraryUsageDescription: "Select an image or video for
+      the active camera source."
+    - UIRequiresFullScreen: true
+    - Chỉ hỗ trợ Portrait orientation
+    - CFBundleVersion: 37 (build number nội bộ)
+
+================================================================================
+                         KẾT THÚC PHÂN TÍCH
+================================================================================
