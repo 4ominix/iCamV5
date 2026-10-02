@@ -9,5 +9,6 @@ VCNextOverlay_FILES += VCNScreenCapture.m
 VCNextOverlay_FRAMEWORKS = Foundation CoreFoundation UIKit QuartzCore IOSurface CoreGraphics Security
 VCNextOverlay_LIBRARIES = VCNShared
 VCNextOverlay_CFLAGS = -fobjc-arc -I../VCNShared
+VCNextOverlay_LDFLAGS = -L../VCNShared/.theos/obj
 
 include $(THEOS_MAKE_PATH)/tweak.mk

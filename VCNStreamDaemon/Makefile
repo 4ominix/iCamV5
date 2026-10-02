@@ -13,6 +13,7 @@ VCNStreamDaemon_FILES += rtmp/rtmp_flv.c
 VCNStreamDaemon_FRAMEWORKS = Foundation CoreFoundation Security
 VCNStreamDaemon_LIBRARIES = VCNShared
 VCNStreamDaemon_CFLAGS = -fobjc-arc -I../VCNShared
+VCNStreamDaemon_LDFLAGS = -L../VCNShared/.theos/obj
 VCNStreamDaemon_INSTALL_PATH = /usr/libexec
 
 include $(THEOS_MAKE_PATH)/tool.mk
