@@ -15,6 +15,14 @@ extern NSString *const VCNStreamStopNotification;
 extern NSString *const VCNAccountErrorDomain;
 extern NSString *const VCNSecurityErrorDomain;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void VCNPostDarwinNotification(NSString *name);
 void VCNObserveDarwinNotification(NSString *name, CFNotificationCallback callback, const void *observer);
 void VCNRemoveDarwinObserver(const void *observer);
+
+#ifdef __cplusplus
+}
+#endif
