@@ -14,7 +14,7 @@
 #import "VCNSecurity.h"
 
 #define RTMP_PORT 1935
-#define STATUS_POLL_INTERVAL 5.0
+#define STATUS_POLL_INTERVAL 5
 
 static rtmp_server_t *g_server = NULL;
 

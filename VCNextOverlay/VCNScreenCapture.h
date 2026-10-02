@@ -3,8 +3,15 @@
 // RECONSTRUCTED: Class name, capture method interface
 
 #import <Foundation/Foundation.h>
-#import <IOSurface/IOSurface.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+
+typedef struct __IOSurface *IOSurfaceRef;
+
+CF_EXPORT IOSurfaceRef IOSurfaceCreate(CFDictionaryRef properties);
+CF_EXPORT size_t IOSurfaceAlignProperty(CFStringRef property, size_t value);
+CF_EXPORT const CFStringRef kIOSurfaceBytesPerRow;
+CF_EXPORT const CFStringRef kIOSurfaceAllocSize;
 
 @interface VCNScreenCapture : NSObject
 
