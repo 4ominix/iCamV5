@@ -6,7 +6,9 @@
 #import "VCNConfig.h"
 #import "VCNPaths.h"
 #import "VCNNotifications.h"
+#import <sys/stat.h>
 #import <sys/utsname.h>
+#import <unistd.h>
 
 @implementation VCNConfig
 
