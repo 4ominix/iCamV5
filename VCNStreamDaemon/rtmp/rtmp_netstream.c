@@ -1,4 +1,5 @@
 #include "rtmp_netstream.h"
+#include "rtmp_netconnection.h"
 #include <string.h>
 #include <stdlib.h>
 
