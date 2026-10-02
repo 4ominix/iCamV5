@@ -6,6 +6,7 @@
 
 #import <Foundation/Foundation.h>
 #import <signal.h>
+#import <unistd.h>
 #import "rtmp/rtmp_server.h"
 #import "VCNPaths.h"
 #import "VCNNotifications.h"

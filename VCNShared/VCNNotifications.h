@@ -1,3 +1,4 @@
+#import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
 
 extern NSString *const VCNAuthSessionChangedNotification;
