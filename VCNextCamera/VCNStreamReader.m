@@ -145,8 +145,7 @@ typedef struct {
     if (data.length < 5) return;
     const uint8_t *bytes = data.bytes;
 
-    uint8_t frameType = (bytes[0] >> 4) & 0x0F;
-    uint8_t codecID   = bytes[0] & 0x0F;
+    uint8_t codecID = bytes[0] & 0x0F;
 
     if (codecID != 7) return; // AVC/H.264
 
