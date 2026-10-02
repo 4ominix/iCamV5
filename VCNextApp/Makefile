@@ -11,7 +11,7 @@ VCNext_FILES += VCNCameraConfigController.m
 VCNext_FRAMEWORKS = UIKit Foundation CoreFoundation Security PhotosUI AVFoundation UniformTypeIdentifiers
 VCNext_LIBRARIES = VCNShared
 VCNext_CFLAGS = -fobjc-arc -I../VCNShared
-VCNext_LDFLAGS = -L../VCNShared/.theos/obj
+VCNext_LDFLAGS = -L../.theos/obj
 VCNext_CODESIGN_FLAGS = -Sentitlements.plist
 
 include $(THEOS_MAKE_PATH)/application.mk

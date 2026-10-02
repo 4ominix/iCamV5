@@ -9,7 +9,7 @@ VCNNetworkDaemon_FILES += VCNCellularPolicy.m
 VCNNetworkDaemon_FRAMEWORKS = Foundation CoreFoundation Security
 VCNNetworkDaemon_LIBRARIES = VCNShared
 VCNNetworkDaemon_CFLAGS = -fobjc-arc -I../VCNShared
-VCNNetworkDaemon_LDFLAGS = -L../VCNShared/.theos/obj
+VCNNetworkDaemon_LDFLAGS = -L../.theos/obj
 VCNNetworkDaemon_INSTALL_PATH = /usr/libexec
 VCNNetworkDaemon_CODESIGN_FLAGS = -Sentitlements.plist
 
