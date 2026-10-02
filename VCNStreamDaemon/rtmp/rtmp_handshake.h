@@ -1,9 +1,10 @@
 #ifndef RTMP_HANDSHAKE_H
 #define RTMP_HANDSHAKE_H
 
-#include "rtmp_server.h"
 #include <stdint.h>
 #include <stddef.h>
+
+typedef struct rtmp_server rtmp_server_t;
 
 typedef enum {
     RTMP_HS_WAITING_C0 = 0,
