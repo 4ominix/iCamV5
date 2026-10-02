@@ -11,7 +11,7 @@ VCNextCamera_FILES += VCNColorSync.m
 VCNextCamera_FILES += VCNStreamReader.m
 VCNextCamera_FRAMEWORKS = Foundation CoreFoundation AVFoundation CoreImage CoreVideo CoreMedia VideoToolbox CoreGraphics ImageIO Vision Security
 VCNextCamera_LIBRARIES = VCNShared
-VCNextCamera_CFLAGS = -fobjc-arc -I../VCNShared
+VCNextCamera_CFLAGS = -fobjc-arc -I../VCNShared -DCI_SILENCE_GL_DEPRECATION
 VCNextCamera_LDFLAGS = -L../.theos/obj
 
 include $(THEOS_MAKE_PATH)/tweak.mk
